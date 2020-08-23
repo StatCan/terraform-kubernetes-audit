@@ -1,0 +1,340 @@
+# Copyright 2020 Statistics Canadaa
+#
+# Licensed under the Apache License, Version 2.0 (the "License");
+# you may not use this file except in compliance with the License.
+# You may obtain a copy of the License at
+#
+#     https://www.apache.org/licenses/LICENSE-2.0
+#
+# Unless required by applicable law or agreed to in writing, software
+# distributed under the License is distributed on an "AS IS" BASIS,
+# WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+# See the License for the specific language governing permissions and
+# limitations under the License.
+
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: auditd-logging
+  annotations:
+    kubernetes.io/description: 'DaemonSet that enables Linux auditd logging on AKS nodes.'
+spec:
+  selector:
+    matchLabels:
+      name: auditd-logging
+  template:
+    metadata:
+      annotations:
+        scheduler.alpha.kubernetes.io/critical-pod: ""
+      labels:
+        name: auditd-logging
+    spec:
+      hostNetwork: true
+      hostPID: true
+      nodeSelector:
+        kubernetes.io/os: linux
+      initContainers:
+      - name: auditd-setup
+        image: ubuntu
+        command:
+        - /bin/sh
+        - -c
+        - |
+          chroot /host apt install auditd
+          cp -rf /etc/aks-audit/auditd.service /host/etc/systemd/system/auditd.service
+          cp -rf /etc/aks-audit-rules/audit.rules /host/etc/audit/audit.rules
+          chroot /host systemctl daemon-reload
+          chroot /host systemctl restart auditd.service
+        securityContext:
+          privileged: true
+        volumeMounts:
+        - name: host
+          mountPath: /host
+        - mountPath: /etc/aks-audit/auditd.service
+          subPath: auditd.service
+          name: config-auditd-volume
+        - mountPath: /etc/aks-audit-rules/audit.rules
+          subPath: audit.rules
+          name: config-auditd-rules-volume
+        resources:
+          requests:
+            memory: "10Mi"
+            cpu: "10m"
+      containers:
+      - name: fluentd-aks-auditd
+        env:
+        - name: NODE_NAME
+          valueFrom:
+            fieldRef:
+              apiVersion: v1
+              fieldPath: spec.nodeName
+        image: statcan/kube-fluentd-operator
+        imagePullPolicy: IfNotPresent
+        livenessProbe:
+          exec:
+            command:
+            - /bin/sh
+            - -c
+            - |
+              LIVENESS_THRESHOLD_SECONDS=${LIVENESS_THRESHOLD_SECONDS:-300}; STUCK_THRESHOLD_SECONDS=${LIVENESS_THRESHOLD_SECONDS:-900}; if [ ! -e /var/log/fluentd-buffers ]; then
+                exit 1;
+              fi; touch -d "${STUCK_THRESHOLD_SECONDS} seconds ago" /tmp/marker-stuck; if [[ -z "$(find /var/log/fluentd-buffers -type f -newer /tmp/marker-stuck -print -quit)" ]]; then
+                rm -rf /var/log/fluentd-buffers;
+                exit 1;
+              fi; touch -d "${LIVENESS_THRESHOLD_SECONDS} seconds ago" /tmp/marker-liveness; if [[ -z "$(find /var/log/fluentd-buffers -type f -newer /tmp/marker-liveness -print -quit)" ]]; then
+                exit 1;
+              fi;
+          failureThreshold: 3
+          initialDelaySeconds: 600
+          periodSeconds: 60
+          successThreshold: 1
+          timeoutSeconds: 1
+        resources:
+          limits:
+            cpu: "1"
+            memory: 500Mi
+          requests:
+            cpu: 100m
+            memory: 200Mi
+        terminationMessagePath: /dev/termination-log
+        terminationMessagePolicy: File
+        volumeMounts:
+        - mountPath: /var/log
+          name: varlog
+        - mountPath: /host/lib
+          name: libsystemddir
+          readOnly: true
+        - mountPath: /etc/aks-fluentd/aks-fluentd.conf
+          subPath: aks-fluentd.conf
+          name: config-fluentd-volume
+      volumes:
+      - hostPath:
+          path: /
+        name: host
+      - hostPath:
+          path: /var/log
+        name: varlog
+      - hostPath:
+          path: /usr/lib
+        name: libsystemddir
+      - configMap:
+          defaultMode: 420
+          name: aks-config-auditd
+        name: config-auditd-volume
+      - configMap:
+          defaultMode: 420
+          name: aks-config-auditd-rules
+        name: config-auditd-rules-volume
+      - configMap:
+          defaultMode: 420
+          name: aks-config-fluentd
+        name: config-fluentd-volume
+      dnsPolicy: Default
+      restartPolicy: Always
+      terminationGracePeriodSeconds: 30
+      # tolerations:
+      # - effect: NoSchedule
+      #   key: node.alpha.kubernetes.io/ismaster
+      # - effect: NoExecute
+      #   operator: Exists
+  updateStrategy:
+    rollingUpdate:
+      maxUnavailable: 1
+    type: RollingUpdate
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: aks-config-auditd
+  annotations:
+    kubernetes.io/description: 'ConfigMap for Linux auditd logging daemonset on AKS nodes.'
+data:
+  auditd.service: |-
+    [Unit]
+    Description=Security Auditing Service
+    DefaultDependencies=no
+    After=local-fs.target systemd-tmpfiles-setup.service
+    Conflicts=shutdown.target
+    Before=sysinit.target shutdown.target
+    ConditionKernelCommandLine=!audit=0
+
+    [Service]
+    ExecStart=/sbin/auditd -n
+    ## To use augenrules, copy this file to /etc/systemd/system/auditd.service
+    ## and uncomment the next line and delete/comment out the auditctl line.
+    ## Then copy existing rules to /etc/audit/rules.d/
+    ## Not doing this last step can cause loss of existing rules
+    #ExecStartPost=-/sbin/augenrules --load
+    ExecStartPost=-/sbin/auditctl -R /etc/audit/audit.rules
+    ExecReload=/bin/kill -HUP $MAINPID
+
+    [Install]
+    WantedBy=multi-user.target
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: aks-config-auditd-rules
+  annotations:
+    kubernetes.io/description: 'ConfigMap for Linux auditd logging daemonset on AKS nodes.'
+data:
+  audit.rules: |-
+    # increase kernel audit buffers since we have a lot of rules
+    -b 8192
+
+    # 4.1.4 Ensure events that modify date and time information are collected
+    -a always,exit -F arch=b64 -S adjtimex -S settimeofday -k time-change
+    -a always,exit -F arch=b32 -S adjtimex -S settimeofday -S stime -k time-change
+    -a always,exit -F arch=b64 -S clock_settime -k time-change
+    -a always,exit -F arch=b32 -S clock_settime -k time-change
+    -w /etc/localtime -p wa -k time-change
+
+    # 4.1.5 Ensure events that modify user/group information are collected
+    -w /etc/group -p wa -k identity
+    -w /etc/passwd -p wa -k identity
+    -w /etc/gshadow -p wa -k identity
+    -w /etc/shadow -p wa -k identity
+    -w /etc/security/opasswd -p wa -k identity
+
+    # 4.1.6 Ensure events that modify the system's network environment are collected
+    -a always,exit -F arch=b64 -S sethostname -S setdomainname -k system-locale
+    -a always,exit -F arch=b32 -S sethostname -S setdomainname -k system-locale
+    -w /etc/issue -p wa -k system-locale
+    -w /etc/issue.net -p wa -k system-locale
+    -w /etc/hosts -p wa -k system-locale
+    -w /etc/network -p wa -k system-locale
+    -w /etc/networks -p wa -k system-locale
+
+    # 4.1.7 Ensure events that modify the system's Mandatory Access Controls are collected
+    -w /etc/selinux/ -p wa -k MAC-policy
+
+    # 4.1.8 Ensure login and logout events are collected
+    -w /var/log/faillog -p wa -k logins
+    -w /var/log/lastlog -p wa -k logins
+    -w /var/log/tallylog -p wa -k logins
+
+    # 4.1.9 Ensure session initiation information is collected
+    -w /var/run/utmp -p wa -k session
+    -w /var/log/wtmp -p wa -k session
+    -w /var/log/btmp -p wa -k session
+
+    # 4.1.10 Ensure discretionary access control permission modification events are collected
+    -a always,exit -F arch=b64 -S chmod -S fchmod -S fchmodat -F auid>=1000 -F auid!=4294967295 -k perm_mod
+    -a always,exit -F arch=b32 -S chmod -S fchmod -S fchmodat -F auid>=1000 -F auid!=4294967295 -k perm_mod
+    -a always,exit -F arch=b64 -S chown -S fchown -S fchownat -S lchown -F auid>=1000 -F auid!=4294967295 -k perm_mod
+    -a always,exit -F arch=b32 -S chown -S fchown -S fchownat -S lchown -F auid>=1000 -F auid!=4294967295 -k perm_mod
+    -a always,exit -F arch=b64 -S setxattr -S lsetxattr -S fsetxattr -S removexattr -S lremovexattr -S fremovexattr -F auid>=1000 -F auid!=4294967295 -k perm_mod
+    -a always,exit -F arch=b32 -S setxattr -S lsetxattr -S fsetxattr -S removexattr -S lremovexattr -S fremovexattr -F auid>=1000 -F auid!=4294967295 -k perm_mod
+
+    # 4.1.11 Ensure unsuccessful unauthorized file access attempts are collected
+    -a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=4294967295 -k access
+    -a always,exit -F arch=b32 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EACCES -F auid>=1000 -F auid!=4294967295 -k access
+    -a always,exit -F arch=b64 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=4294967295 -k access
+    -a always,exit -F arch=b32 -S creat -S open -S openat -S truncate -S ftruncate -F exit=-EPERM -F auid>=1000 -F auid!=4294967295 -k access
+
+    # 4.1.12 Ensure use of privileged commands is collected
+    -a always,exit -F path=/usr/lib/dbus-1.0/dbus-daemon-launch-helper -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/lib/openssh/ssh-keysign -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/lib/eject/dmcrypt-get-device -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/sudo -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/wall -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/ssh-agent -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/expiry -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/chfn -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/pkexec -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/screen -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/chsh -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/newgidmap -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/chage -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/crontab -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/at -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/newgrp -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/mlocate -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/gpasswd -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/newuidmap -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/passwd -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/usr/bin/bsd-write -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/bin/umount -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/bin/mount -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/bin/ntfs-3g -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/bin/ping6 -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/bin/su -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/bin/ping -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/bin/fusermount -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/sbin/pam_extrausers_chkpwd -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/sbin/mount.nfs -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+    -a always,exit -F path=/sbin/unix_chkpwd -F perm=x -F auid>=1000 -F auid!=4294967295  -k privileged
+
+    # 4.1.13 Ensure successful file system mounts are collected
+    -a always,exit -F arch=b64 -S mount -F auid>=1000 -F auid!=4294967295 -k mounts
+    -a always,exit -F arch=b32 -S mount -F auid>=1000 -F auid!=4294967295 -k mounts
+
+    # 4.1.14 Ensure file deletion events by users are collected
+    -a always,exit -F arch=b64 -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k delete
+    -a always,exit -F arch=b32 -S unlink -S unlinkat -S rename -S renameat -F auid>=1000 -F auid!=4294967295 -k delete
+
+    # 4.1.15 Ensure changes to system administration scope (sudoers) is collected
+    -w /etc/sudoers -p wa -k scope
+    -w /etc/sudoers.d -p wa -k scope
+
+    # 4.1.16 Ensure system administrator actions (sudolog) are collected
+    -w /var/log/sudo.log -p wa -k actions
+
+    # 4.1.17 Ensure kernel module loading and unloading is collected
+    -w /sbin/insmod -p x -k modules
+    -w /sbin/rmmod -p x -k modules
+    -w /sbin/modprobe -p x -k modules
+    -a always,exit -F arch=b64 -S init_module -S delete_module -k modules
+
+    # CIS for Docker security controls
+    -w /etc/docker -p wa -k docker
+    -w /etc/docker/daemon.json -p wa -k docker
+    -w /etc/systemd/system/docker.service.d -p wa -k docker
+    -w /lib/systemd/system/docker.service -p wa -k docker
+    -w /lib/systemd/system/docker.socket -p wa -k docker
+    -w /var/lib/docker -p wa -k docker
+    -w /usr/bin/containerd -p wax -k docker
+    -w /usr/bin/dockerd -p wax -k docker
+    -w /usr/sbin/runc -p wax -k docker
+    -w /var/run/docker.sock -p wa -k docker
+
+    # 4.1.18 Ensure the audit configuration is immutable
+    # -e 2
+
+---
+kind: ConfigMap
+apiVersion: v1
+metadata:
+  name: aks-config-fluentd
+  annotations:
+    kubernetes.io/description: 'ConfigMap for Linux auditd logging daemonset on AKS nodes.'
+data:
+  aks-fluentd.conf: |-
+    <source>
+      @type tail
+      path /var/log/audit/audit.log
+      pos_file /var/log/audit/audit.log.pos
+      time_format %Y-%m-%dT%H:%M:%S
+      tag auditlog.requests
+      format json
+      time_key timestamp
+      time_format %iso8601
+    </source>
+
+    <filter auditlog**>
+      @type record_transformer
+      enable_ruby
+      <record>
+        @timestamp ${record['@timestamp'].nil? ? Time.at(time).getutc.to_datetime.rfc3339(6) : Time.parse(record['@timestamp']).getutc.to_datetime.rfc3339(6)}
+        auditlog.hostname ${(begin; File.open('/etc/docker-hostname') { |f| f.readline }.rstrip; rescue; "localhost"; end)}
+      </record>
+    </filter>
+
+    # Do not collect fluentd's own logs to avoid infinite loops.
+    <match fluent.**>
+      @type null
+    </match>
+
+    <match auditlog**>
+      @type default
+    </match>
