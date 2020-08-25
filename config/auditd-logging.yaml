@@ -35,7 +35,7 @@ spec:
         kubernetes.io/os: linux
       initContainers:
       - name: auditd-setup
-        image: ubuntu
+        image: ubuntu:latest
         command:
         - /bin/sh
         - -c
@@ -104,9 +104,6 @@ spec:
         - mountPath: /host/lib
           name: libsystemddir
           readOnly: true
-        - mountPath: /etc/aks-fluentd/aks-fluentd.conf
-          subPath: aks-fluentd.conf
-          name: config-fluentd-volume
       volumes:
       - hostPath:
           path: /
@@ -125,18 +122,14 @@ spec:
           defaultMode: 420
           name: aks-config-auditd-rules
         name: config-auditd-rules-volume
-      - configMap:
-          defaultMode: 420
-          name: aks-config-fluentd
-        name: config-fluentd-volume
       dnsPolicy: Default
       restartPolicy: Always
       terminationGracePeriodSeconds: 30
-      # tolerations:
-      # - effect: NoSchedule
-      #   key: node.alpha.kubernetes.io/ismaster
-      # - effect: NoExecute
-      #   operator: Exists
+      tolerations:
+      - effect: NoSchedule
+        operator: Exists
+      - effect: NoExecute
+        operator: Exists
   updateStrategy:
     rollingUpdate:
       maxUnavailable: 1
@@ -300,41 +293,3 @@ data:
 
     # 4.1.18 Ensure the audit configuration is immutable
     # -e 2
-
----
-kind: ConfigMap
-apiVersion: v1
-metadata:
-  name: aks-config-fluentd
-  annotations:
-    kubernetes.io/description: 'ConfigMap for Linux auditd logging daemonset on AKS nodes.'
-data:
-  aks-fluentd.conf: |-
-    <source>
-      @type tail
-      path /var/log/audit/audit.log
-      pos_file /var/log/audit/audit.log.pos
-      time_format %Y-%m-%dT%H:%M:%S
-      tag auditlog.requests
-      format json
-      time_key timestamp
-      time_format %iso8601
-    </source>
-
-    <filter auditlog**>
-      @type record_transformer
-      enable_ruby
-      <record>
-        @timestamp ${record['@timestamp'].nil? ? Time.at(time).getutc.to_datetime.rfc3339(6) : Time.parse(record['@timestamp']).getutc.to_datetime.rfc3339(6)}
-        auditlog.hostname ${(begin; File.open('/etc/docker-hostname') { |f| f.readline }.rstrip; rescue; "localhost"; end)}
-      </record>
-    </filter>
-
-    # Do not collect fluentd's own logs to avoid infinite loops.
-    <match fluent.**>
-      @type null
-    </match>
-
-    <match auditlog**>
-      @type default
-    </match>

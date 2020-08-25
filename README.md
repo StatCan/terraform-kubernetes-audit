@@ -22,7 +22,7 @@ The following security controls can be met through configuration of this templat
 
 ```terraform
 module "kubectl_audit" {
-  source = "github.com/canada-ca-terraform-modules/terraform-kubernetes-audit?ref=v1.0.0"
+  source = "github.com/canada-ca-terraform-modules/terraform-kubernetes-audit?ref=v1.0.1"
 
   dependencies = [
     "${module.namespace_monitoring.depended_on}",
@@ -45,4 +45,5 @@ module "kubectl_audit" {
 
 | Date     | Release    | Change                                                     |
 | -------- | ---------- | ---------------------------------------------------------- |
-| v1.0.0   | v1.0.0     | 1st release                                                |
+| 20200823 | v1.0.0     | 1st release                                                |
+| 20200824 | v1.0.1     | 1st release                                                |
