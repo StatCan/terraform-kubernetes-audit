@@ -286,10 +286,10 @@ data:
     -w /lib/systemd/system/docker.service -p wa -k docker
     -w /lib/systemd/system/docker.socket -p wa -k docker
     -w /var/lib/docker -p wa -k docker
-    -w /usr/bin/containerd -p wax -k docker
-    -w /usr/bin/docker -p wax -k docker
-    -w /usr/bin/dockerd -p wax -k docker
-    -w /usr/sbin/runc -p wax -k docker
+    -w /usr/bin/containerd -p wa -k docker
+    -w /usr/bin/docker -p wa -k docker
+    -w /usr/bin/dockerd -p wa -k docker
+    -w /usr/sbin/runc -p wa -k docker
     -w /var/run/docker.sock -p wa -k docker
 
     # 4.1.18 Ensure the audit configuration is immutable
