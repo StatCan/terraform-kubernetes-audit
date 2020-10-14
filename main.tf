@@ -18,9 +18,12 @@ resource "null_resource" "dependency_getter" {
 }
 
 resource "null_resource" "audit_init" {
+  triggers = {
+    hash_audit = filesha256("${path.module}/config/auditd-logging.yaml")
+  }
 
   provisioner "local-exec" {
-    command = "kubectl -n ${var.kubectl_namespace} apply -f ${"${path.module}/config/"}"
+    command = "kubectl -n ${var.kubectl_namespace} apply -f ${"${path.module}/config/auditd-logging.yaml"}"
   }
 
   depends_on = [
