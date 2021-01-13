@@ -25,7 +25,7 @@ module "kubectl_audit" {
   source = "github.com/canada-ca-terraform-modules/terraform-kubernetes-audit?ref=v1.0.1"
 
   dependencies = [
-    "${module.namespace_monitoring.depended_on}",
+    module.namespace_monitoring.depended_on,
   ]
 
   kubectl_service_account = "tiller"
@@ -47,3 +47,4 @@ module "kubectl_audit" {
 | -------- | ---------- | ---------------------------------------------------------- |
 | 20200823 | v1.0.0     | 1st release                                                |
 | 20200824 | v1.0.1     | 1st release                                                |
+| 20201025 | v2.0.0     | 2nd release                                                |
